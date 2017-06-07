@@ -315,8 +315,8 @@ __global__ void RawToDigi_kernel(const CablingMap *Map,const uint *Word,const ui
   uint blockId = blockIdx.x;
   uint eventno = blockIdx.y;
 
-  uint event_offset = eventIndex[blockDim.y*stream +eventno];
-  uint fed_offset = 2*150*eventno; 
+  uint event_offset = eventIndex[gridDim.y*stream +eventno];
+  uint fed_offset = 2*150*eventno +2*150*gridDim.y*stream; 
    
   uint fedId    = fedIndex[fed_offset+blockId];
   if(blockIdx.x==gridDim.x-1) {
@@ -325,6 +325,10 @@ __global__ void RawToDigi_kernel(const CablingMap *Map,const uint *Word,const ui
   uint threadId = threadIdx.x;
   uint begin  = event_offset+ fedIndex[fed_offset+150+blockId];
   uint end    = event_offset+ fedIndex[fed_offset+150+blockId+1];
+   if(blockIdx.x==gridDim.x-1) {
+    end = eventIndex[gridDim.y*stream + eventno+1];
+    //if(threadIdx.x==0) printf("blockIdx: %u  blockIdx.y: %u  end: %u\n",blockId, eventno, end);
+  }
   //if(threadIdx.x==0)
   //printf("blockId: %u eventno: %u event_offset: %u  fed_offset: %u fedId: %u begin: %u  end: %u\n",blockId,eventno, event_offset,fed_offset, fedId, begin, end);
   int no_itr = (end - begin)/ blockDim.x + 1; // to deal with number of hits greater than blockDim.x 

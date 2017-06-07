@@ -80,6 +80,8 @@ int main() {
   high_resolution_clock::time_point t2 = high_resolution_clock::now();
   double ms = duration_cast<milliseconds> (t2-t1).count();
   cout<<"Time(ms) to read from ascii file: "<<ms<<endl;
+
+  //out for(int i=0;i<=N_EVENT*2;i++) cout<<eventIndex_h[i]<<endl;
   RawToDigi_kernel_wrapper(eventIndex_h, fedIndex_h, word_h); 
 
   cudaFreeHost(fedCount_h);
