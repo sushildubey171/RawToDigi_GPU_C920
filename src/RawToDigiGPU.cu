@@ -96,7 +96,7 @@ void initDeviceMemory() {
   mIndexEnd = (int*)malloc(mSize);
 
   const int N = N_EVENT* N_STREAM*sizeof(uint);
-  const int SIZE = MAX_FED*MAX_WORD*N;
+  const int SIZE = MAX_FED*MAX_WORD*N/2;
   const int M = 2*150*N;
   // device memory
   //cudaMallocHost((void**)&fedCount_d,N);
@@ -115,10 +115,11 @@ void initDeviceMemory() {
   //cudaMalloc((void**)&xx_adc,       MAX_WORD_SIZE); // to store the x and y coordinate
   //cudaMalloc((void**)&yy_adc,       MAX_WORD_SIZE);
   //cudaMalloc((void**)&layer_d ,     MAX_WORD_SIZE);
-  //cudaMalloc((void**)&RawId_d,      MAX_WORD_SIZE);
+  cudaMalloc((void**)&RawId_d,      SIZE);
+  checkCUDAError("cudaMalloc failed!");
   //cudaMalloc((void**)&moduleId_d,   MAX_WORD_SIZE);
-  cudaMalloc((void**)&mIndexStart_d, mSize);
-  cudaMalloc((void**)&mIndexEnd_d, mSize);
+  //cudaMalloc((void**)&mIndexStart_d, mSize);
+  //cudaMalloc((void**)&mIndexEnd_d, mSize);
   
   cout<<"Memory Allocated successfully !\n";
   // Upload the cabling Map
@@ -307,24 +308,26 @@ __global__ void applyADCthreshold_kernel
 */
 
 // Kernel to perform Raw to Digi conversion
-__global__ void RawToDigi_kernel(const CablingMap *Map,const uint *Word,const uint *fedIndex, 
-                                 uint *eventIndex, uint stream, uint *XX, uint *YY,uint *ADC,int *mIndexStart,int *mIndexEnd)
+__global__ void RawToDigi_kernel(const CablingMap *Map,uint *Word,const uint *fedIndex, 
+                                 uint *eventIndex, uint stream, uint *XX, uint *YY,uint *ADC,uint *RawId )
  
 {
   //printf("Inside GPU: \n");
   uint blockId = blockIdx.x;
   uint eventno = blockIdx.y;
 
-  uint event_offset = eventIndex[blockDim.y*stream +eventno];
-  uint fed_offset = 2*150*eventno; 
+  uint event_offset = eventIndex[gridDim.y*stream +eventno];
+  uint fed_offset = 2*150*eventno + 2*150*gridDim.y*stream; 
    
   uint fedId    = fedIndex[fed_offset+blockId];
-  if(blockIdx.x==gridDim.x-1) {
-    //printf("blockId: %u fedId: %u\n",blockId, fedId);
-    return;}
+ 
   uint threadId = threadIdx.x;
   uint begin  = event_offset+ fedIndex[fed_offset+150+blockId];
   uint end    = event_offset+ fedIndex[fed_offset+150+blockId+1];
+  if(blockIdx.x==gridDim.x-1) {
+    end = eventIndex[gridDim.y*stream + eventno+1];
+    //if(threadIdx.x==0) printf("blockIdx: %u  blockIdx.y: %u  end: %u\n",blockId, eventno, end);
+  }
   //if(threadIdx.x==0)
   //printf("blockId: %u eventno: %u event_offset: %u  fed_offset: %u fedId: %u begin: %u  end: %u\n",blockId,eventno, event_offset,fed_offset, fedId, begin, end);
   int no_itr = (end - begin)/ blockDim.x + 1; // to deal with number of hits greater than blockDim.x 
@@ -338,8 +341,9 @@ __global__ void RawToDigi_kernel(const CablingMap *Map,const uint *Word,const ui
         //noise and dead channels are ignored
         XX[gIndex] = 0;  // 0 is an indicator of a noise/dead channel
         YY[gIndex]  = 0; // skip these pixels during clusterization
-        //RawId[gIndex] = 0; 
+        Word[gIndex] = fedId; 
         ADC[gIndex]   = 0; 
+        RawId[gIndex] = 9999;
         //moduleId[gIndex] = 9999; //9999 is the indication of bad module, taken care later  
         //layerArr[gIndex] = 0;
         //fedIdArr[gIndex] = fedId; // used for testing
@@ -399,7 +403,8 @@ __global__ void RawToDigi_kernel(const CablingMap *Map,const uint *Word,const ui
       XX[gIndex]    = globalPix.row +1 ; // origin shifting by 1 0-159
       YY[gIndex]    = globalPix.col +1 ; // origin shifting by 1 0-415
       ADC[gIndex]   = getADC(ww);
-      //RawId[gIndex] = detId.RawId; // only for testing
+      Word[gIndex] = fedId;
+      RawId[gIndex] = detId.RawId; // only for testing
       //moduleId[gIndex] = detId.moduleId;
     } // end of if(gIndex < end)
   } // end of for(int i =0;i<no_itr...)
@@ -495,6 +500,17 @@ __global__ void RawToDigi_kernel(const CablingMap *Map,const uint *Word,const ui
 
 void RawToDigi_kernel_wrapper(uint *eventIndex_h, uint *fedIndex_h, uint *word_h) {
   initDeviceMemory();
+
+  // allocate memory for the validation purpose
+  uint *xx_h, *yy_h, *adc_h, *RawId_h, *fedId_h;
+  const int N = N_EVENT* N_STREAM*sizeof(uint);
+  const int SIZE = MAX_FED*MAX_WORD*N;
+  xx_h = (uint*)malloc(SIZE);
+  yy_h = (uint*)malloc(SIZE);
+  adc_h = (uint*)malloc(SIZE);
+  RawId_h = (uint*)malloc(SIZE);
+  fedId_h = (uint*)malloc(SIZE);
+  
   cudaStream_t stream[N_STREAM];
   for(int i=0;i<N_STREAM;i++)
     cudaStreamCreate(&stream[i]);
@@ -504,28 +520,50 @@ void RawToDigi_kernel_wrapper(uint *eventIndex_h, uint *fedIndex_h, uint *word_h
   dim3 gridsize(MAX_FED,N_EVENT);
   dim3 blocksize = 512;
   //for(uint j=0;j<20;j++)
-  for(uint i=0;i<N_STREAM;i++) {
+  for(uint i=0;i<N_STREAM-1;i++) {
     word_offset = W_size;
     fed_offset  = F_size;
 
     W_size  =  eventIndex_h[N_EVENT+N_EVENT*i]-eventIndex_h[N_EVENT*i];
     F_size  = 2*150*N_EVENT;
-    cout<<"word_offset: "<<word_offset<<"  fed_offset: "<<fed_offset<<endl;
-    cout<<"W_size: "<<W_size<<" F_size:"<<F_size<<endl;
-    cudaMemcpyAsync(&eventIndex_d[N_EVENT*i], &eventIndex_h[N_EVENT*i], N_EVENT*sizeof(uint), cudaMemcpyHostToDevice, stream[i] );
+    //cout<<"word_offset: "<<word_offset<<"  fed_offset: "<<fed_offset<<endl;
+    //cout<<"W_size: "<<W_size<<" F_size:"<<F_size<<endl;
+    cout<<"Iteration: "<<i<<endl;
+    cudaMemcpyAsync(&eventIndex_d[N_EVENT*i], &eventIndex_h[N_EVENT*i], (N_EVENT+1)*sizeof(uint), cudaMemcpyHostToDevice, stream[i] );
     checkCUDAError("Error in copying eventIndex");
+    
     cudaMemcpyAsync(&word_d[word_offset], &word_h[word_offset], W_size*sizeof(uint), cudaMemcpyHostToDevice,stream[i]);
     checkCUDAError("Error in copying word");
+    
     cudaMemcpyAsync(&fedIndex_d[fed_offset], &fedIndex_h[fed_offset], F_size*sizeof(uint), cudaMemcpyHostToDevice,stream[i]);
     checkCUDAError("Error in copying fedIndex");
-    for(int j=0;j<20;j++) {
-    RawToDigi_kernel<<<gridsize,blocksize,0,stream[i]>>>(Map,word_d,fedIndex_d,eventIndex_d,i,xx_d,yy_d,adc_d,mIndexStart_d,mIndexEnd_d);
+    
+    //for(int j=0;j<20;j++) {
+    RawToDigi_kernel<<<gridsize,blocksize,0,stream[i]>>>(Map,word_d,fedIndex_d,eventIndex_d,i,xx_d,yy_d,adc_d,RawId_d);
     //cudaDeviceSynchronize();
-    }
+    cudaMemcpyAsync(&xx_h[word_offset], &xx_d[word_offset], W_size*sizeof(uint), cudaMemcpyDeviceToHost, stream[i]);
+    cudaMemcpyAsync(&yy_h[word_offset], &yy_d[word_offset], W_size*sizeof(uint), cudaMemcpyDeviceToHost, stream[i]);
+    cudaMemcpyAsync(&RawId_h[word_offset], &RawId_d[word_offset], W_size*sizeof(uint), cudaMemcpyDeviceToHost, stream[i]);
+    cudaMemcpyAsync(&adc_h[word_offset], &adc_d[word_offset], W_size*sizeof(uint), cudaMemcpyDeviceToHost, stream[i]);
+    cudaMemcpyAsync(&fedId_h[word_offset], &word_d[word_offset], W_size*sizeof(uint), cudaMemcpyDeviceToHost, stream[i]);
+    
+    
+    //}
   }
   cudaDeviceSynchronize();
+  ofstream R2D("R2D_GPU_500.txt");
+  //R2D<<"fedId\t"<<"RawId\t"<<"xx\t"<<"yy\t"<<"adc"<<endl;
+  for(int i=0;i<W_size;i++) {
+    if(xx_h[i]>0) {xx_h[i] -=1; yy_h[i] -=1;}
+    R2D<<setw(6)<<fedId_h[i]+1200<<setw(14)<<RawId_h[i]<<setw(6)<<xx_h[i]<<setw(6)<<yy_h[i]<<setw(6)<<adc_h[i]<<endl;
+  }
+  R2D.close();
   checkCUDAError("Error after kernel call");
   freeMemory();
+  free(xx_h);
+  free(yy_h);
+  free(adc_h);
+  free(RawId_h);
 }
 
 /* old implementation with 1 events
